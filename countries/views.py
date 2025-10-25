@@ -28,8 +28,7 @@ def refresh_countries(request):
     Fetch all countries and exchange rates, compute GDP, and store/update DB.
     Handles partial validation failures gracefully.
     Returns:
-        200 - all valid and saved successfully
-        207 - partial success (some invalid entries skipped)
+        200 - successful (even if some invalid entries skipped)
         400 - all invalid (nothing saved)
         503 - external API failure
         500 - unexpected internal error
@@ -51,7 +50,6 @@ def refresh_countries(request):
     try:
         with transaction.atomic():
             for c in countries_data:
-                # Extract main fields
                 name = c.get("name")
                 capital = c.get("capital")
                 region = c.get("region")
@@ -67,13 +65,13 @@ def refresh_countries(request):
                     invalid_countries.append({"country": name, "error": "population is required"})
                     continue
 
-                # Extract first currency code
-                code = currencies[0].get("code") if currencies else None
+                # ✅ Normalize currency code
+                code = (currencies[0].get("code") or "").upper() if currencies else None
                 exchange_rate = None
                 estimated_gdp = None
 
                 if not code:
-                    # No currency, mark exchange_rate null and GDP = 0
+                    # Currency missing → store but with 0 GDP
                     estimated_gdp = 0
                 else:
                     rate = rates.get(code)
@@ -86,7 +84,7 @@ def refresh_countries(request):
                         exchange_rate = None
                         estimated_gdp = None
 
-                # Save or update existing record
+                # ✅ Insert or update record
                 Country.objects.update_or_create(
                     name__iexact=name,
                     defaults={
@@ -103,10 +101,9 @@ def refresh_countries(request):
                 )
                 total_saved += 1
 
-        # Determine response type
         total_in_db = Country.objects.count()
 
-        # Case 1: Everything invalid
+        # Case 1: All invalid — nothing saved
         if total_saved == 0:
             return json_error(
                 "Validation failed",
@@ -114,27 +111,29 @@ def refresh_countries(request):
                 status=400
             )
 
-        # Case 2: Partial success
-        if invalid_countries:
+        # ✅ Generate summary image safely
+        try:
             generate_summary_image()
-            return JsonResponse({
-                "message": "Refresh completed with some invalid entries.",
-                "total_countries_saved": total_in_db,
-                "invalid_entries_count": len(invalid_countries),
-                "sample_invalids": invalid_countries[:5],  # Show first 5 only
-                "last_refreshed_at": now.replace(microsecond=0).isoformat() + "Z"
-            }, status=207)
+        except Exception:
+            pass
 
-        # Case 3: Full success
-        generate_summary_image()
-        return JsonResponse({
-            "message": "Refresh successful",
-            "total_countries": total_in_db,
-            "last_refreshed_at": now.replace(microsecond=0).isoformat() + "Z"
-        })
+        # ✅ Always return 200 OK, even if some countries were invalid
+        response_data = {
+            "message": (
+                "Refresh completed with some invalid entries."
+                if invalid_countries else "Refresh successful"
+            ),
+            "total_countries_saved": total_in_db,
+            "invalid_entries_count": len(invalid_countries),
+            "sample_invalids": invalid_countries[:5] if invalid_countries else [],
+            "last_refreshed_at": now.replace(microsecond=0).isoformat() + "Z",
+        }
+
+        return JsonResponse(response_data, status=200)
 
     except Exception as e:
         return json_error("Internal server error", details=str(e), status=500)
+
 
 
 @require_GET
